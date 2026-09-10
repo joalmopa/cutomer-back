@@ -48,9 +48,7 @@ jobs:
       # compile = fase de Maven que genera las clases en target/classes.
       - name: Compile with Maven
       #        Porque el proyecto tiene un Wrapper
-        run: mvnw clean install
-             echo "build with Maven"
-#        run: mvn -B -DskipTests compile
+        run: mvn -B -DskipTests clean install
 
       # 4) Ejecuta los tests de src/test/java (JUnit).
       # Maven primero compila los tests y luego los corre (surefire).
