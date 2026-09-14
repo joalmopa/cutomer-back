@@ -43,9 +43,8 @@ jobs:
           ls -la
 
       # Sube el JAR a la pestana Actions > Artifacts de ESTE run (caduca a los N dias).
-      # @v3 esta deshabilitado en github.com desde 2025; usa v4 o superior.
       - name: Publish jar as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: artifactjar
           path: ${{ github.workspace }}/target/${{ env.ARTIFACT_NAME }}
