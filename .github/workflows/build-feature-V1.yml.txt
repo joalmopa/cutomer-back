@@ -1,0 +1,57 @@
+# Cada vez que se envia al Repositorio una rama feature (patron feature/*)
+# se ejecuta este workflow: compilacion con Maven + tests unitarios.
+#
+# Este archivo vive en .github/workflows/ para que GitHub Actions lo detecte solo.
+# Puedes tener varios workflows; cada archivo .yml/.yaml es un workflow independiente.
+
+# Nombre que veras en la pestana Actions de GitHub.
+name: Build and test feature branch
+
+# "on" define QUE evento dispara el workflow.
+on:
+  # Se dispara cuando haces git push (no en pull request, ni en merge a develop/main).
+  push:
+    branches:
+      # Patron glob: coincide con feature/lo-que-sea (ej. feature/github-actions-jam).
+      # No coincide con feature/a/b (un slash extra). Para eso usarias feature/**
+      - feature/*
+
+# Un workflow tiene uno o mas jobs. Cada job corre en su propia maquina virtual (runner).
+jobs:
+  # Identificador interno del job (sin espacios). Es lo que ves como recuadro en el grafo.
+  build-feature:
+    # Imagen del runner. ubuntu-latest = Ubuntu en la nube, con git, curl, etc. ya instalados.
+    # Maven y Java NO vienen listos: por eso el paso setup-java mas abajo.
+    runs-on: ubuntu-latest
+
+    # Pasos en orden. Si uno falla, los siguientes no se ejecutan.
+    steps:
+      # 1) Clona ESTE repositorio en el runner, en la rama que disparo el push. "buscar github actions marketpalce"
+      # "uses" llama a una action publicada (aqui la oficial de GitHub).
+      # @v4 es la version de la action; conviene fijarla para que no cambie sola.
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # 2) Instala Java 17 (el mismo del pom.xml: <java.version>17</java.version>).
+      # distribution: temurin = JDK de Eclipse Adoptium, muy usado en CI.
+      # cache: maven guarda ~/.m2 entre ejecuciones para no bajar dependencias cada vez.
+      - name: Setup JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # 3) Compila el codigo (src/main/java) sin correr tests todavia.
+      # mvn = Maven. -B = batch mode (sin preguntas interactivas, obligatorio en CI).
+      # -DskipTests = no ejecuta tests en este paso; solo queremos saber si compila.
+      # compile = fase de Maven que genera las clases en target/classes.
+      - name: Compile with Maven
+      #        Porque el proyecto tiene un Wrapper
+        run: mvn -B -DskipTests clean install
+
+      # 4) Ejecuta los tests de src/test/java (JUnit).
+      # Maven primero compila los tests y luego los corre (surefire).
+      # Si algun test falla, este paso falla y el workflow queda en rojo.
+#      - name: Run unit tests
+#        run: mvn -B test
