@@ -1,0 +1,51 @@
+# Se dispara cuando el Job 2 de build-feature.yml envia el evento publish-artifact-event.
+# OBLIGATORIO: este archivo tiene que existir ya en la rama por defecto del repo
+# (develop o main). repository_dispatch NO lee workflows que solo estan en una feature.
+name: Publish jar as artifact
+
+on:
+  repository_dispatch:
+    types: [publish-artifact-event]git pull
+
+jobs:
+  publish-jar-job:
+    runs-on: ubuntu-latest
+    env:
+      # artifactId + version del pom.xml -> target/customer-0.0.1-SNAPSHOT.jar
+      ARTIFACT_NAME: 'customer-0.0.1-SNAPSHOT.jar'
+    steps:
+      - name: Debug payload
+        run: echo "base_branch=${{ github.event.client_payload.base_branch }}"
+
+      # Bajamos develop (o la rama que mando el Job 2 en client_payload).
+      - name: Checkout merged branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.client_payload.base_branch }}
+
+      - name: Check last commits
+        run: git log -2
+
+      # JDK 17 = <java.version> del pom.xml. cache: maven evita actions/cache aparte.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # Job 1 ya corrio los tests en el PR. Aqui solo empaquetamos el JAR.
+      # -DskipTests: no vuelvas a poner "test" en la misma linea; se contradiria.
+      - name: Build jar with Maven
+        run: |
+          mvn -B clean package -DskipTests --update-snapshots
+          ls -R target/
+          ls -la
+
+      # Sube el JAR a la pestana Actions > Artifacts de ESTE run (caduca a los N dias).
+      # @v3 esta deshabilitado en github.com desde 2025; usa v4 o superior.
+      - name: Publish jar as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifactjar
+          path: ${{ github.workspace }}/target/${{ env.ARTIFACT_NAME }}
