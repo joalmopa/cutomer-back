@@ -1,0 +1,107 @@
+# Workflow de estudio: al abrir/actualizar un PR hacia develop,
+# se compila, se corren tests y, si todo sale bien, se hace merge automatico.
+#
+# Este archivo vive en .github/workflows/ para que GitHub Actions lo detecte solo.
+
+# Nombre que veras en la pestana Actions de GitHub.
+name: build and test feature branch
+
+# "on" define QUE evento dispara el workflow.
+on:
+  # pull_request = alguien abrio (o actualizo) un PR. No es lo mismo que "push".
+  pull_request:
+    # Solo PRs cuya rama DESTINO sea develop (github.base_ref).
+    branches: [ develop ]
+    types:
+      - opened        # acaba de crearse el PR
+      - reopened      # se reabrio un PR cerrado
+      - synchronize   # synchronize: cada commit nuevo al PR. Sin esto, un fix despues de tests en rojo NO volveria a disparar el workflow.
+
+
+# Un workflow tiene uno o mas jobs. Cada job corre en su propia maquina virtual.
+jobs:
+  #############################################################
+  # JOB 1:    descargar el codigo de la feature, Java 17 y comprobar que el proyecto compila y que los tests unitarios pasan.
+  #############################################################
+  build-feature:
+    runs-on: ubuntu-latest
+    steps:
+      # Clona el commit exacto de la rama origen del PR (la feature).
+      # head.sha = el ultimo commit del PR, no el merge commit que GitHub inventa.
+      # @v7 = version mayor de la action oficial; conviene fijarla.
+      - name: Pull and Checkout from feature branch
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # Instala JDK 17 (el mismo del pom.xml: <java.version>17</java.version>).
+      # temurin = Eclipse Adoptium, muy usado en CI.
+      # cache: maven guarda ~/.m2 entre runs. NO hace falta actions/cache aparte.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      # clean: borra target/. package: compila + tests (surefire) + genera el JAR.
+      # -B = batch mode (sin preguntas interactivas; obligatorio en CI).
+      # No uses "mvn test package": package ya ejecuta los tests y los correriamos 2 veces.
+      - name: Build with Maven
+        run: mvn -B clean package
+
+#  #############################################################
+#  # JOB 2:    si el build fue verde, merge de la feature en develop y aviso a otro workflow (publish artifact).
+#  #
+#  # Ojo (estudio vs produccion): esto salta code review. En un repo real suele haber branch protection + aprobaciones antes de mergear.
+#  #############################################################
+#  merge-feature-into-develop:
+#    runs-on: ubuntu-latest
+#    # needs: este job NO arranca si el JOB 1 "build-feature" falló o se cancelo.
+#    needs: build-feature
+#    # Solo mergeamos PRs del MISMO repo (no forks). En un fork no existe
+#    # origin/nombre-de-la-feature y ademas seria un riesgo de seguridad.
+#    if: github.event.pull_request.head.repo.full_name == github.repository
+#    # GITHUB_TOKEN por defecto es de solo lectura en muchos casos.
+#    # contents:write = git push a develop.
+#    # pull-requests:write = por si mas adelante comentas el PR.
+#    permissions:
+#      contents: write
+#      pull-requests: write
+#    steps:
+#      # Descargamos develop (rama DESTINO del PR = github.base_ref).
+#      # fetch-depth: 0 = historial completo. El default (1 commit) rompe el merge.
+#      - name: Checkout develop
+#        uses: actions/checkout@v7
+#        with:
+#          ref: ${{ github.base_ref }}
+#          fetch-depth: 0
+#
+#      # --no-ff crea siempre un merge commit (no un fast-forward).
+#      # -m es obligatorio en CI: si no, git abre un editor y el job se queda colgado.
+#      # user.name / user.email son del commit de merge DENTRO del runner, no de tu PC.
+#      - name: Merge feature into develop
+#        run: |
+#          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+#          git config --global user.name "github-actions[bot]"
+#          git fetch origin "${{ github.head_ref }}"
+#          git merge --no-ff --verbose "origin/${{ github.head_ref }}" -m "Merge pull request #${{ github.event.number }}"
+#
+#      # checkout ya deja GITHUB_TOKEN en git. Un git push basta:
+#      # no hace falta ad-m/github-push-action@master (puntero movible = riesgo).
+#      - name: Push develop after merge
+#        run: git push origin "HEAD:${{ github.base_ref }}"
+#
+#      # Dispara OTRO workflow que escuche:
+#      #   on:
+#      #     repository_dispatch:
+#      #       types: [publish-artifact-event]
+#      # Ese workflow tiene que estar en la rama por defecto del repo.
+#      # GITHUB_TOKEN sirve si el dispatch es al MISMO repositorio.
+#      - name: Trigger publish artifact
+#        uses: peter-evans/repository-dispatch@v4
+#        with:
+#          token: ${{ secrets.GITHUB_TOKEN }}
+#          repository: ${{ github.repository }}
+#          event-type: publish-artifact-event
+#          client-payload: '{ "base_branch": "${{ github.base_ref }}" }'
