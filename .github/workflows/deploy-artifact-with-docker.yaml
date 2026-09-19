@@ -110,7 +110,7 @@ jobs:
       #    Los jobs no comparten disco: por eso se pasa por artifacts.
       ##########################################################################################################################
       - name: Upload docker build context
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v7
         with:
           name: dockerBuildContext
           path: |
