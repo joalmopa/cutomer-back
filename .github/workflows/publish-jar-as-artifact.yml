@@ -10,6 +10,8 @@ on:
 jobs:
   publish-jar-job:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     env:
       # artifactId + version del pom.xml -> target/customer-0.0.1-SNAPSHOT.jar
       ARTIFACT_NAME: 'customer-0.0.1-SNAPSHOT.jar'
@@ -48,3 +50,27 @@ jobs:
         with:
           name: artifactjar
           path: ${{ github.workspace }}/target/${{ env.ARTIFACT_NAME }}
+
+      # SHA1 del archivo .jar (no del paquete "artifactjar").
+      # deploy-artifact-with-docker.yaml lo compara con el JAR que descarga.
+      - name: Compute jar checksum
+        id: jar-hash
+        run: echo "checksum=$(sha1sum target/${{ env.ARTIFACT_NAME }} | awk '{ print $1 }')" >> "$GITHUB_OUTPUT"
+
+
+      # Dispara deploy-artifact-with-docker.yaml (on: repository_dispatch types: [deploy-artifact-event]).
+      # Ese workflow tiene que estar ya en la rama por defecto.
+      - name: Trigger deploy artifact with Docker
+        uses: peter-evans/repository-dispatch@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          event-type: deploy-artifact-event
+          # | = bloque literal: el JSON puede ir en varias lineas (JSON admite espacios).
+          client-payload: |
+            {
+              "artifact_name": "${{ env.ARTIFACT_NAME }}",
+              "checksum": "${{ steps.jar-hash.outputs.checksum }}",
+              "base_branch": "${{ github.event.client_payload.base_branch }}",
+              "run_id": "${{ github.run_id }}"
+            }

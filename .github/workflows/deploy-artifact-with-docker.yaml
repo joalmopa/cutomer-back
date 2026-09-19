@@ -1,0 +1,191 @@
+# Se dispara cuando publish-jar-as-artifact.yml envia el evento deploy-artifact-event.
+# OBLIGATORIO: este archivo tiene que existir ya en la rama por defecto del repo
+# (develop o main). repository_dispatch NO lee workflows que solo estan en una feature.
+#
+# Cadena:
+#   Merge PR -> build-feature.yml
+#            -> publish-artifact-event
+#            -> publish-jar-as-artifact.yml  (sube el JAR + checksum)
+#            -> deploy-artifact-event
+#            -> ESTE workflow (baja el JAR, arma Docker, sube la imagen a GHCR)
+name: Deploy artifact with Docker
+
+# "on" define QUE evento dispara el workflow.
+on:
+  # No es un push ni un PR: es un evento custom que dispara otro workflow.
+  repository_dispatch:
+    types: [deploy-artifact-event]
+
+jobs:
+  ##########################################################################################################################
+  # JOB 1: bajar el JAR publicado, comprobar checksum y armar
+  #        el "contexto" de Docker (Dockerfile + .jar juntos).
+  ##########################################################################################################################
+  dowlonad-artifact-job:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read    # para git checkout del Dockerfile
+      actions: read     # para bajar artifacts de OTRO workflow
+    steps:
+      ##########################################################################################################################
+      # 1) Payload que mando publish-jar-as-artifact.yml
+      #    github.event.client_payload.* = el JSON del client-payload
+      #    - checksum      = SHA1 del .jar
+      #    - artifact_name = customer-0.0.1-SNAPSHOT.jar (el archivo, NO "artifactjar")
+      #    - base_branch   = develop
+      #    - run_id        = el run de publish (por si quieres bajar ESE artifact)
+      ##########################################################################################################################
+      - name: Retrieve payload
+        run: |
+          echo "checksum=${{ github.event.client_payload.checksum }}"
+          echo "artifact_name=${{ github.event.client_payload.artifact_name }}"
+          echo "base_branch=${{ github.event.client_payload.base_branch }}"
+
+      ##########################################################################################################################
+      # 2) Bajar el paquete "artifactjar" del workflow de publish.
+      #    name: artifactjar = etiqueta del paquete en Actions (un "zip").
+      #    Dentro viene el fichero customer-0.0.1-SNAPSHOT.jar.
+      #    dawidd6 puede buscar artifacts de OTRO workflow; la action oficial
+      #    solo baja artifacts del MISMO run.
+      ##########################################################################################################################
+      - name: Download jar from publish workflow
+        uses: dawidd6/action-download-artifact@v2
+        id: download-artifact
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: publish-jar-as-artifact.yml
+          workflow_conclusion: success
+          name: artifactjar
+          path: /tmp/artifactjar
+
+      - name: Display downloaded files
+        run: ls -R /tmp/artifactjar
+
+      ##########################################################################################################################
+      # 3) SHA1 del .jar descargado. Lo guardamos en env.HASH
+      #    (GITHUB_ENV = variables para los siguientes steps de ESTE job).
+      ##########################################################################################################################
+      - name: Checksum of downloaded jar
+        if: success()
+        id: hash
+        run: echo "HASH=$(sha1sum /tmp/artifactjar/${{ github.event.client_payload.artifact_name }} | awk '{ print $1 }')" >> $GITHUB_ENV
+
+      ##########################################################################################################################
+      # 4) Comparar con el checksum del payload.
+      #    Si no coinciden, alguien toco el JAR (o se bajo otro run) -> el job falla.
+      #    exit 1 pone este step (y el job) en rojo.
+      ##########################################################################################################################
+      - name: Compare checksum
+        run: |
+          if [ "${{ env.HASH }}" == "${{ github.event.client_payload.checksum }}" ]; then
+              echo "The checksum are equals! seccesfully operations."
+          else
+              echo "The checksum are no equals! failure operation."
+              exit 1
+          fi
+
+      ##########################################################################################################################
+      # 5) Checkout del repo para copiar .docker/Dockerfile.
+      #    Por defecto clona la rama default (develop/main).
+
+      # 6) Contexto de build = carpeta con Dockerfile + JAR juntos.
+      #    Docker COPY ${JAR_FILE} busca el jar EN ESA carpeta, no en target/.
+      ##########################################################################################################################
+      - name: Checkout repository
+        if: success()
+        uses: actions/checkout@v3
+
+      - name: Prepare docker build context
+        run: |
+          echo "print the current directory show files"
+          ls -la
+          echo "preparing docker build context"
+          cp .docker/Dockerfile /tmp/Dockerfile
+          cp /tmp/artifactjar/${{ github.event.client_payload.artifact_name }} /tmp/${{ github.event.client_payload.artifact_name }}
+          ls -la /tmp
+
+      ##########################################################################################################################
+      # 7) Subir ese contexto como artifact de ESTE run.
+      #    El Job 2 (otra maquina virtual) lo bajara con download-artifact.
+      #    Los jobs no comparten disco: por eso se pasa por artifacts.
+      ##########################################################################################################################
+      - name: Upload docker build context
+        uses: actions/upload-artifact@v3
+        with:
+          name: dockerBuildContext
+          path: |
+            /tmp/Dockerfile
+            /tmp/${{ github.event.client_payload.artifact_name }}
+
+  #  ******************************************************************************************************************************
+  # JOB 2: construir la imagen Docker y publicarla en GHCR
+  #        (GitHub Container Registry: ghcr.io).
+  # needs: no arranca si el Job 1 fallo.
+  #  ******************************************************************************************************************************
+  docker-job:
+    needs:
+      - dowlonad-artifact-job
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read     # bajar dockerBuildContext de este mismo workflow
+      packages: write   # push a ghcr.io
+    steps:
+      ##########################################################################################################################
+      # 1) QEMU: emulador. Sirve si mas adelante compilas para
+      #    otra arquitectura (ej. ARM). En un build amd64 simple no es obligatorio.
+      ##########################################################################################################################
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      ##########################################################################################################################
+      # 2) Buildx: el builder moderno de Docker (el que usa build-push-action).
+      ##########################################################################################################################
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      ##########################################################################################################################
+      # 3) Login a GHCR (no a Docker Hub: el registry es ghcr.io).
+      #    username = quien disparo el workflow.
+      #    password = GITHUB_TOKEN (con packages: write de arriba).
+      ##########################################################################################################################
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      ##########################################################################################################################
+      # 4) Bajar dockerBuildContext que subio el Job 1.
+      #    actions/download-artifact (oficial) funciona entre jobs del MISMO run.
+      ##########################################################################################################################
+      - name: Download docker build context
+        uses: actions/download-artifact@v8
+        with:
+          name: dockerBuildContext
+          path: ./dockerBuildContext
+
+      - name: Display docker build context
+        run: ls -R dockerBuildContext
+
+      ##########################################################################################################################
+      # 5) docker build + docker push.
+      #    context = carpeta con Dockerfile y el .jar
+      #    file    = ruta al Dockerfile
+      #    build-args coinciden con ARG del Dockerfile:
+      #      JAR_FILE     = nombre del archivo .jar
+      #      DB_PASSWORD  = secret del repo -> ENV en la imagen. se define en el Repo. Ruta: Abrir el Repo - ir a Settings - Secrests and Variables - Actions
+      #    tags = nombre completo de la imagen en GHCR.
+      #    En repository_dispatch, github.sha es el commit de la rama por defecto.
+      ##########################################################################################################################
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./dockerBuildContext # Contexto donde Dockerfile y artefactos (aqui es donde estan los archivos .jar, .war ...)
+          file: ./dockerBuildContext/Dockerfile
+          build-args: |
+            JAR_FILE=${{ github.event.client_payload.artifact_name }}
+            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          push: true # Se le indica que se va a publicar (hacer un push) al repositorio de imagenes, este repo es gitHub packages
+          tags: ghcr.io/${{ github.repository_owner }}/cutomer-back:${{ github.sha }}  # se crea un Tag, con el nombre completo d ela imagen, incluye el repo, usuario y nombre d ela imagen
